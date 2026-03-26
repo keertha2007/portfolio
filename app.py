@@ -1,52 +1,65 @@
 """
 Portfolio Backend - Flask Python Server
-Handles serving the portfolio page and saving contact form submissions to PostgreSQL.
+Production-ready for Render + Neon PostgreSQL
 """
 
 import os
 from flask import Flask, render_template, request, jsonify
 import psycopg2
 import psycopg2.extras
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 
 
+# ✅ Better DB connection (Neon requires SSL)
 def get_db_connection():
-    """Create and return a database connection using DATABASE_URL env variable."""
     database_url = os.environ.get("DATABASE_URL")
+
     if not database_url:
         raise Exception("DATABASE_URL environment variable is not set.")
-    return psycopg2.connect(database_url)
+
+    return psycopg2.connect(database_url, sslmode="require")
 
 
+# ✅ Initialize DB safely
 def init_db():
-    """Create the contacts table if it doesn't exist."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS contacts (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR(100) NOT NULL,
-            email VARCHAR(255) NOT NULL,
-            message TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-    print("Database initialized successfully.")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS contacts (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                email VARCHAR(255) NOT NULL,
+                message TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Database initialized successfully.")
+
+    except Exception as e:
+        print(f"❌ DB Init Error: {e}")
+
+
+# ✅ Run DB init only once on startup (Render safe)
+@app.before_first_request
+def initialize():
+    init_db()
 
 
 @app.route("/")
 def home():
-    """Serve the main portfolio page."""
     return render_template("index.html")
 
 
 @app.route("/contact", methods=["POST"])
 def contact():
-    """Save a contact form submission to the database."""
     data = request.get_json()
 
     if not data:
@@ -56,59 +69,72 @@ def contact():
     email = data.get("email", "").strip()
     message = data.get("message", "").strip()
 
-    # Basic validation
+    # ✅ Validation
     if not name or not email or not message:
         return jsonify({"success": False, "error": "All fields are required."}), 400
 
     if len(name) > 100:
-        return jsonify({"success": False, "error": "Name is too long (max 100 chars)."}), 400
+        return jsonify({"success": False, "error": "Name too long"}), 400
 
     if len(email) > 255 or "@" not in email:
-        return jsonify({"success": False, "error": "Invalid email address."}), 400
+        return jsonify({"success": False, "error": "Invalid email"}), 400
 
     if len(message) > 2000:
-        return jsonify({"success": False, "error": "Message is too long (max 2000 chars)."}), 400
+        return jsonify({"success": False, "error": "Message too long"}), 400
 
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "INSERT INTO contacts (name, email, message) VALUES (%s, %s, %s) RETURNING id, created_at",
-            (name, email, message)
-        )
+
+        cur.execute("""
+            INSERT INTO contacts (name, email, message)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        """, (name, email, message))
+
         result = cur.fetchone()
+
         conn.commit()
         cur.close()
         conn.close()
+
         return jsonify({
             "success": True,
-            "message": "Thank you! Your message has been saved.",
+            "message": "Message saved successfully!",
             "id": result["id"]
         }), 201
+
     except Exception as e:
-        print(f"Database error: {e}")
-        return jsonify({"success": False, "error": "Failed to save message. Please try again."}), 500
+        print(f"❌ DB Error: {e}")
+        return jsonify({"success": False, "error": "Server error"}), 500
 
 
 @app.route("/contacts", methods=["GET"])
 def get_contacts():
-    """Get all contact form submissions (for admin review)."""
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM contacts ORDER BY created_at DESC")
+
+        cur.execute("""
+            SELECT id, name, email, message, created_at
+            FROM contacts
+            ORDER BY created_at DESC
+        """)
+
         contacts = cur.fetchall()
+
         cur.close()
         conn.close()
+
         return jsonify([dict(row) for row in contacts])
+
     except Exception as e:
-        print(f"Database error: {e}")
-        return jsonify({"error": "Failed to fetch contacts."}), 500
+        print(f"❌ Fetch Error: {e}")
+        return jsonify({"error": "Failed to fetch contacts"}), 500
 
 
-init_db()
-
+# ✅ IMPORTANT for Render (Gunicorn handles this)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"Starting portfolio server on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    print(f"🚀 Running on port {port}")
+    app.run(host="0.0.0.0", port=port)
